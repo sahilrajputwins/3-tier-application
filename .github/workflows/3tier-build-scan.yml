@@ -1,0 +1,113 @@
+name: 3-Tier Application Build and Scan
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/**'
+      - 'k8s/**'
+  workflow_dispatch:
+
+env:
+  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+  DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+  NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+  GIT_EMAIL: ${{ secrets.GIT_EMAIL }}
+  GIT_NAME: ${{ secrets.GIT_NAME }}
+  GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    name: Push Docker Images and Update Kubernetes Manifest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20.x'
+
+      - name: Extract commit SHA
+        id: vars
+        run: echo "IMAGE_TAG=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
+
+      - name: Build frontend Docker image
+        run: |
+          cd frontend
+          docker build -t sahilrajputwins/frontend-image-3ta:${{ env.IMAGE_TAG }} .
+
+      - name: Build backend Docker image
+        run: |
+          cd backend
+          docker build -t sahilrajputwins/backend-image-3ta:${{ env.IMAGE_TAG }} .
+
+      - name: Log in to Docker Hub
+        run: echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USERNAME}" --password-stdin
+
+      - name: Push Docker images to Docker Hub
+        run: |
+          docker push sahilrajputwins/frontend-image-3ta:${{ env.IMAGE_TAG }}
+          docker push sahilrajputwins/backend-image-3ta:${{ env.IMAGE_TAG }}
+
+      - name: Update image tag in Kubernetes manifest
+        run: |
+          sed -i "s|image: .*/frontend-image-3ta:.*|image: sahilrajputwins/frontend-image-3ta:${{ env.IMAGE_TAG }}|g" k8s/3tier-manifest.yaml
+          sed -i "s|image: .*/backend-image-3ta:.*|image: sahilrajputwins/backend-image-3ta:${{ env.IMAGE_TAG }}|g" k8s/3tier-manifest.yaml
+
+      - name: Commit and push manifest updates
+        env:
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          GIT_EMAIL: ${{ secrets.GIT_EMAIL }}
+          GIT_NAME: ${{ secrets.GIT_NAME }}
+        run: |
+          git config user.email "$GIT_EMAIL"
+          git config user.name "$GIT_NAME"
+          git add k8s/3tier-manifest.yaml
+          git commit -m "Update image tag to $IMAGE_TAG" || echo "No changes to commit"
+          git remote set-url origin https://x-access-token:$GIT_TOKEN@github.com/${{ github.repository }}
+          git push origin HEAD:main
+
+  scan-frontend:
+    runs-on: ubuntu-latest
+    name: OWASP Scan - Frontend
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run OWASP Dependency Check (Frontend)
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: "OWASP Scan Frontend"
+          path: ./frontend
+          format: HTML
+          out: reports-frontend
+          nvdApiKey: ${{ secrets.NVD_API_KEY }}
+
+      - name: Upload OWASP Frontend Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-frontend-report
+          path: reports-frontend
+
+  scan-backend:
+    runs-on: ubuntu-latest
+    name: OWASP Scan - Backend
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run OWASP Dependency Check (Backend)
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: "OWASP Scan Backend"
+          path: ./backend
+          format: HTML
+          out: reports-backend
+          nvdApiKey: ${{ secrets.NVD_API_KEY }}
+
+      - name: Upload OWASP Backend Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-backend-report
+          path: reports-backend
